@@ -1,0 +1,244 @@
+// ============================================================================
+// Вариант 1: Централизованный Delivery Orchestrator (State Machine + Kafka)
+// ============================================================================
+
+specification {
+  element actor {
+    style {
+      shape person
+      color green
+    }
+  }
+  element system {
+    style {
+      shape rectangle
+      color primary
+      opacity 20%
+    }
+  }
+  element service {
+    style {
+      shape rectangle
+      color secondary
+    }
+  }
+  element database {
+    style {
+      shape storage
+      color indigo
+    }
+  }
+  element messageQueue {
+    style {
+      shape queue
+      color amber
+    }
+  }
+  element externalSystem {
+    style {
+      shape rectangle
+      color muted
+    }
+  }
+}
+
+model {
+
+  // ── Акторы ──
+  user = actor 'Пользователь' {
+    description 'Получатель уведомлений'
+  }
+  sender = actor 'Сервис-отправитель' {
+    description 'Переводы, платежи, кредиты'
+    style {
+      color amber
+    }
+  }
+
+  // ── Notification Platform ──
+  np = system 'Notification Platform' {
+
+    api = service 'Notification API' {
+      technology 'Rust / Actix-Web'
+      description 'Приём запросов, валидация, дедупликация, маршрутизация в Kafka'
+    }
+
+    redis = database 'Redis Cluster' {
+      technology 'Redis 7'
+      description 'Idempotency keys, user preferences cache, delivery state cache'
+    }
+
+    kafka = messageQueue 'Apache Kafka' {
+      technology 'Kafka 3.x'
+      description 'Durable message broker. Топики: transactional, service, marketing, delivery-events'
+    }
+
+    orch = service 'Delivery Orchestrator' {
+      technology 'Rust'
+      description 'State machine, failover logic, retry scheduler'
+      style {
+        color primary
+      }
+    }
+
+    pg = database 'PostgreSQL' {
+      technology 'PostgreSQL 16'
+      description 'Delivery state (notification statuses), user preferences, audit log'
+    }
+
+    pushAdapter = service 'Push Adapter' {
+      technology 'Rust'
+      description 'Отправка через FCM/APNs'
+    }
+
+    smsAdapter = service 'SMS Adapter' {
+      technology 'Rust'
+      description 'Отправка через SMS-провайдеров (основной + резервный)'
+    }
+
+    emailAdapter = service 'Email Adapter' {
+      technology 'Rust'
+      description 'Отправка через Email-провайдеров'
+    }
+
+    monitor = service 'Monitoring & Alerting' {
+      technology 'Grafana + Prometheus + Loki'
+      description 'Дашборды, алерты, трассировка'
+      style {
+        color gray
+      }
+    }
+  }
+
+  // ── Внешние системы ──
+  fcm = externalSystem 'FCM / APNs' {
+    description 'Push-провайдеры'
+  }
+  smsProvider1 = externalSystem 'SMS Provider (основной)' {
+    description 'Twilio / SMS.ru'
+  }
+  smsProvider2 = externalSystem 'SMS Provider (резервный)' {
+    description 'Резервный SMS-провайдер'
+  }
+  emailProvider = externalSystem 'Email Provider' {
+    description 'SendGrid / Mailgun'
+  }
+
+  // ── Связи ──
+  sender -> np.api 'POST /notify' {
+    technology 'HTTPS + API Key'
+  }
+
+  np.api -> np.redis 'Check idempotency key'
+  np.api -> np.kafka 'Produce: transactional topic'
+
+  np.kafka -> np.orch 'Consume: transactional + delivery-events'
+
+  np.orch -> np.pg 'Read/write delivery state'
+  np.orch -> np.redis 'Read user preferences, delivery state cache'
+  np.orch -> np.pushAdapter 'Send push request'
+  np.orch -> np.smsAdapter 'Send SMS request (failover)'
+  np.orch -> np.emailAdapter 'Send email request (failover)'
+
+  np.pushAdapter -> fcm 'Send push'
+  np.smsAdapter -> smsProvider1 'Send SMS (основной)'
+  np.smsAdapter -> smsProvider2 'Send SMS (резервный)'
+  np.emailAdapter -> emailProvider 'Send email'
+
+  np.pushAdapter -> np.kafka 'Produce: delivery-events'
+  np.smsAdapter -> np.kafka 'Produce: delivery-events'
+  np.emailAdapter -> np.kafka 'Produce: delivery-events'
+
+  fcm -> user 'Push notification'
+  smsProvider1 -> user 'SMS'
+  smsProvider2 -> user 'SMS'
+  emailProvider -> user 'Email'
+}
+
+views {
+
+  // ── Container Diagram ──
+  view index of np {
+    title 'Вариант 1: Centralized Delivery Orchestrator — Container Diagram'
+    include *
+    include sender
+    include user
+    include fcm
+    include smsProvider1
+    include smsProvider2
+    include emailProvider
+  }
+
+  // ── Sequence: Happy Path (push доставлен) ──
+  dynamic view happyPathA {
+    title 'Вариант 1: Успешная доставка через push'
+
+    sender -> np.api 'POST /notify {idempotency_key, user_id, type: transactional}'
+    np.api -> np.redis 'GET idempotency:{key}'
+    np.api <- np.redis 'null (новый запрос)'
+    np.api -> np.redis 'SET idempotency:{key} = notification_id, EX 24h'
+    np.api -> np.kafka 'produce(notification_id, user_id, payload)'
+    sender <- np.api '202 Accepted {notification_id}'
+
+    np.kafka -> np.orch 'consume(notification)'
+    np.orch -> np.pg 'INSERT delivery_state(notification_id, status=CREATED)'
+    np.orch -> np.redis 'GET user_prefs:{user_id}'
+    np.orch <- np.redis '{preferred_channel: push, push_token: "xxx"}'
+    np.orch -> np.pg 'UPDATE status=SENDING_PUSH'
+    np.orch -> np.pushAdapter 'send(notification_id, push_token, payload)'
+    np.pushAdapter -> fcm 'HTTP POST /send'
+    np.pushAdapter <- fcm '200 OK {message_id}'
+    np.pushAdapter -> np.kafka 'produce(notification_id, channel=push, status=SENT)'
+
+    np.kafka -> np.orch 'consume(delivery_event)'
+    np.orch -> np.pg 'UPDATE status=DELIVERED_PUSH, INSERT audit_log'
+
+    include user, smsAdapter, smsProvider1, smsProvider2, emailAdapter, emailProvider
+  }
+
+  // ── Sequence: Failover (push → SMS) ──
+  dynamic view failoverA {
+    title 'Вариант 1: Failover push → SMS'
+
+    sender -> np.api 'POST /notify {idempotency_key, ...}'
+    np.api -> np.kafka 'produce(notification)'
+    sender <- np.api '202 Accepted'
+
+    np.kafka -> np.orch 'consume(notification)'
+    np.orch -> np.pg 'INSERT status=CREATED'
+    np.orch -> np.redis 'GET user_prefs:{user_id}'
+    np.orch <- np.redis '{preferred_channel: push, phone: "+7..."}'
+    np.orch -> np.pg 'UPDATE status=SENDING_PUSH'
+    np.orch -> np.pushAdapter 'send(notification_id, token, payload)'
+    np.pushAdapter -> fcm 'HTTP POST /send'
+    np.pushAdapter <- fcm '200 OK'
+    np.pushAdapter -> np.kafka 'produce(status=SENT_TO_PROVIDER)'
+    np.kafka -> np.orch 'consume(SENT_TO_PROVIDER)'
+
+    // Timeout — failover
+    np.orch -> np.orch 'Timeout 30s! No client ACK. Initiate failover.' {
+      notes '30 секунд без mobile ACK — запускаем failover на SMS'
+    }
+    np.orch -> np.pg 'UPDATE status=FAILOVER_SMS'
+    np.orch -> np.redis 'CHECK already_delivered:{notification_id} → false'
+    np.orch -> np.smsAdapter 'send(notification_id, phone, payload)'
+
+    // Основной SMS-провайдер недоступен
+    np.smsAdapter -> smsProvider1 'HTTP POST /send'
+    np.smsAdapter <- smsProvider1 '500 Internal Server Error' {
+      notes 'Основной провайдер недоступен — переключение на резервный'
+    }
+
+    // Резервный SMS-провайдер
+    np.smsAdapter -> smsProvider2 'HTTP POST /send'
+    np.smsAdapter <- smsProvider2 '200 OK {sms_id}'
+    np.smsAdapter -> np.kafka 'produce(channel=sms, status=SENT, provider=backup)'
+
+    np.kafka -> np.orch 'consume(delivery_event)'
+    np.orch -> np.redis 'SET already_delivered:{notification_id} = true, EX 24h'
+    np.orch -> np.pg 'UPDATE status=DELIVERED_SMS, INSERT audit_log(failover: push→sms)'
+
+    include user, emailAdapter, emailProvider
+  }
+
+}

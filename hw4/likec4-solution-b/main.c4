@@ -1,0 +1,237 @@
+// ============================================================================
+// Вариант 2: Event-Driven Choreography (Saga на событиях)
+// ============================================================================
+
+specification {
+  element actor {
+    style {
+      shape person
+      color green
+    }
+  }
+  element system {
+    style {
+      shape rectangle
+      color primary
+      opacity 20%
+    }
+  }
+  element service {
+    style {
+      shape rectangle
+      color secondary
+    }
+  }
+  element database {
+    style {
+      shape storage
+      color indigo
+    }
+  }
+  element messageQueue {
+    style {
+      shape queue
+      color amber
+    }
+  }
+  element externalSystem {
+    style {
+      shape rectangle
+      color muted
+    }
+  }
+}
+
+model {
+
+  // ── Акторы ──
+  user = actor 'Пользователь' {
+    description 'Получатель уведомлений'
+  }
+  sender = actor 'Сервис-отправитель' {
+    description 'Переводы, платежи, кредиты'
+    style {
+      color amber
+    }
+  }
+
+  // ── Notification Platform ──
+  np = system 'Notification Platform' {
+
+    api = service 'Notification API' {
+      technology 'Rust / Actix-Web'
+      description 'Приём, валидация, дедупликация, определение первого канала'
+    }
+
+    redis = database 'Redis Cluster' {
+      technology 'Redis 7'
+      description 'Idempotency, delivery locks, user prefs cache'
+    }
+
+    kafka = messageQueue 'Apache Kafka' {
+      technology 'Kafka 3.x'
+      description 'Топики: push-commands, sms-commands, email-commands, delivery-events, timeout-events'
+    }
+
+    pushSvc = service 'Push Service' {
+      technology 'Rust'
+      description 'Слушает push-commands, отправляет push, публикует результат'
+    }
+
+    smsSvc = service 'SMS Service' {
+      technology 'Rust'
+      description 'Слушает sms-commands + push-failed events, отправляет SMS'
+    }
+
+    emailSvc = service 'Email Service' {
+      technology 'Rust'
+      description 'Слушает email-commands + sms-failed events, отправляет email'
+    }
+
+    timeoutSvc = service 'Timeout Service' {
+      technology 'Rust'
+      description 'Scheduled jobs: проверяет уведомления без ACK, генерирует timeout-events'
+      style {
+        color red
+      }
+    }
+
+    tracker = service 'Delivery Tracker' {
+      technology 'Rust'
+      description 'Слушает все delivery-events, обновляет статус в БД, алерты'
+      style {
+        color primary
+      }
+    }
+
+    pg = database 'PostgreSQL' {
+      technology 'PostgreSQL 16'
+      description 'Delivery state, audit log, user preferences'
+    }
+
+    monitor = service 'Monitoring' {
+      technology 'Grafana + Prometheus + Loki'
+      description 'Дашборды, алерты'
+      style {
+        color gray
+      }
+    }
+  }
+
+  // ── Внешние системы ──
+  fcm = externalSystem 'FCM / APNs' {
+    description 'Push-провайдеры'
+  }
+  smsProvider = externalSystem 'SMS Provider' {
+    description 'Основной + резервный'
+  }
+  emailProvider = externalSystem 'Email Provider' {
+    description 'SendGrid / Mailgun'
+  }
+
+  // ── Связи ──
+  sender -> np.api 'POST /notify' {
+    technology 'HTTPS'
+  }
+
+  np.api -> np.redis 'Idempotency check'
+  np.api -> np.kafka 'Produce: push-commands / sms-commands'
+
+  np.kafka -> np.pushSvc 'Consume: push-commands'
+  np.pushSvc -> fcm 'Send push'
+  np.pushSvc -> np.kafka 'Produce: delivery-events (sent/failed)'
+
+  np.kafka -> np.smsSvc 'Consume: sms-commands + push-timeout events'
+  np.smsSvc -> smsProvider 'Send SMS'
+  np.smsSvc -> np.kafka 'Produce: delivery-events'
+
+  np.kafka -> np.emailSvc 'Consume: email-commands + sms-failed events'
+  np.emailSvc -> emailProvider 'Send email'
+  np.emailSvc -> np.kafka 'Produce: delivery-events'
+
+  np.kafka -> np.tracker 'Consume: all delivery-events'
+  np.tracker -> np.pg 'Update delivery state'
+
+  np.timeoutSvc -> np.pg 'Query: unconfirmed notifications'
+  np.timeoutSvc -> np.kafka 'Produce: timeout-events'
+
+  fcm -> user 'Push notification'
+  smsProvider -> user 'SMS'
+  emailProvider -> user 'Email'
+}
+
+views {
+
+  // ── Container Diagram ──
+  view index of np {
+    title 'Вариант 2: Event-Driven Choreography — Container Diagram'
+    include *
+    include sender
+    include user
+    include fcm
+    include smsProvider
+    include emailProvider
+  }
+
+  // ── Sequence: Happy Path (push доставлен) ──
+  dynamic view happyPathB {
+    title 'Вариант 2: Успешная доставка через push (Choreography)'
+
+    sender -> np.api 'POST /notify {idempotency_key, user_id, ...}'
+    np.api -> np.redis 'GET idempotency:{key}'
+    np.api <- np.redis 'null'
+    np.api -> np.redis 'SET idempotency:{key} = notification_id'
+    np.api -> np.kafka 'produce(topic=push-commands, notification)'
+    sender <- np.api '202 Accepted'
+
+    np.kafka -> np.pushSvc 'consume(push-commands)'
+    np.pushSvc -> fcm 'POST /send'
+    np.pushSvc <- fcm '200 OK'
+    np.pushSvc -> np.kafka 'produce(topic=delivery-events, {channel=push, status=DELIVERED})'
+
+    np.kafka -> np.tracker 'consume(delivery-events)'
+    np.tracker -> np.pg 'UPDATE delivery_state SET status=DELIVERED_PUSH'
+    np.tracker -> np.pg 'INSERT audit_log(...)'
+
+    include user, smsSvc, emailSvc, timeoutSvc, smsProvider, emailProvider
+  }
+
+  // ── Sequence: Failover (push timeout → SMS) ──
+  dynamic view failoverB {
+    title 'Вариант 2: Failover push → SMS (Choreography)'
+
+    np.api -> np.kafka 'produce(topic=push-commands, notification)'
+
+    np.kafka -> np.pushSvc 'consume(push-commands)'
+    np.pushSvc -> fcm 'POST /send'
+    np.pushSvc <- fcm '200 OK'
+    np.pushSvc -> np.kafka 'produce(topic=delivery-events, {status=SENT_TO_PROVIDER})'
+
+    np.kafka -> np.tracker 'consume(delivery-events)'
+    np.tracker -> np.pg 'UPDATE status=SENT_PUSH, sent_at=now()'
+
+    // Timeout Service обнаруживает зависшее уведомление
+    np.timeoutSvc -> np.pg 'SELECT WHERE status=SENT_PUSH AND sent_at < now() - 30s' {
+      notes '30 секунд прошло — Timeout Service обнаруживает необработанное уведомление'
+    }
+    np.timeoutSvc <- np.pg '[notification_id]'
+    np.timeoutSvc -> np.redis 'SETNX failover_lock:{notification_id} EX 60'
+    np.timeoutSvc <- np.redis 'OK (lock acquired)'
+    np.timeoutSvc -> np.kafka 'produce(topic=sms-commands, {notification_id, reason=push_timeout})'
+
+    np.kafka -> np.smsSvc 'consume(sms-commands)'
+    np.smsSvc -> np.redis 'CHECK already_delivered:{notification_id}'
+    np.smsSvc <- np.redis 'false'
+    np.smsSvc -> smsProvider 'POST /send(phone, text)'
+    np.smsSvc <- smsProvider '200 OK'
+    np.smsSvc -> np.kafka 'produce(topic=delivery-events, {channel=sms, status=DELIVERED})'
+
+    np.kafka -> np.tracker 'consume(delivery-events)'
+    np.tracker -> np.redis 'SET already_delivered:{notification_id}'
+    np.tracker -> np.pg 'UPDATE status=DELIVERED_SMS'
+    np.tracker -> np.pg 'INSERT audit_log(failover: push→sms)'
+
+    include user, sender, emailSvc, emailProvider
+  }
+
+}
