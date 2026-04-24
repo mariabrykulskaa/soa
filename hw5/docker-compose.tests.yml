@@ -1,0 +1,28 @@
+name: cinema-hw5
+
+services:
+  tests:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+    depends_on:
+      producer:
+        condition: service_healthy
+      aggregator:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      PRODUCER_URL: http://producer:8000
+      AGGREGATOR_URL: http://aggregator:8010
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      PG_DSN: postgresql://analytics:analytics@postgres:5432/analytics
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: minio
+      S3_SECRET_KEY: minio12345
+      S3_BUCKET: movie-analytics

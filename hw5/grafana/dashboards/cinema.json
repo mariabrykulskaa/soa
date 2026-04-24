@@ -1,0 +1,114 @@
+{
+  "uid": "cinema-main",
+  "title": "Online Cinema — Analytics",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {"from": "now-14d", "to": "now"},
+  "refresh": "30s",
+  "tags": ["cinema", "analytics"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "heatmap",
+      "title": "Retention Cohort Heatmap (Day 0..Day 7, % of cohort returning)",
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 0},
+      "options": {
+        "calculate": false,
+        "cellGap": 2,
+        "color": {"mode": "scheme", "scheme": "Blues", "exponent": 0.5, "steps": 64},
+        "yAxis": {"axisPlacement": "left", "reverse": false},
+        "tooltip": {"show": true, "yHistogram": false},
+        "legend": {"show": true}
+      },
+      "fieldConfig": {
+        "defaults": {"unit": "percentunit", "min": 0, "max": 1},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT cohort_date::timestamp AS \"time\", day_n AS \"y\", share AS \"value\" FROM retention_cohort ORDER BY cohort_date, day_n"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "DAU",
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 10},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT metric_date::timestamp AS \"time\", value AS dau FROM metrics WHERE metric_name = 'dau' ORDER BY metric_date"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "View conversion (finished / started)",
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 10},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT metric_date::timestamp AS \"time\", value AS conversion FROM metrics WHERE metric_name = 'view_conversion' ORDER BY metric_date"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "barchart",
+      "title": "Top movies (latest day)",
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 10},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"orientation": "horizontal", "xTickLabelRotation": 0, "legend": {"showLegend": false}},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT dimension AS movie, value AS views FROM metrics WHERE metric_name = 'top_movie_views' AND metric_date = (SELECT max(metric_date) FROM metrics WHERE metric_name = 'top_movie_views') ORDER BY value DESC"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "piechart",
+      "title": "Device distribution (latest day)",
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 18},
+      "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT dimension AS device, value AS share FROM metrics WHERE metric_name = 'device_share' AND metric_date = (SELECT max(metric_date) FROM metrics WHERE metric_name = 'device_share')"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Average watch time (completed views)",
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 18},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT metric_date::timestamp AS \"time\", value AS avg_seconds FROM metrics WHERE metric_name = 'avg_view_seconds' ORDER BY metric_date"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "type": "record",
+  "name": "MovieEvent",
+  "namespace": "cinema.events",
+  "doc": "User-facing event emitted by the Online Cinema Movie Service. Version 1.",
+  "fields": [
+    {
+      "name": "event_id",
+      "type": {"type": "string", "logicalType": "uuid"},
+      "doc": "Unique event identifier (UUIDv4)."
+    },
+    {"name": "user_id",  "type": "string", "doc": "User identifier."},
+    {"name": "movie_id", "type": "string", "doc": "Movie identifier."},
+    {
+      "name": "event_type",
+      "type": {
+        "type": "enum",
+        "name": "EventType",
+        "symbols": ["VIEW_STARTED", "VIEW_FINISHED", "VIEW_PAUSED", "VIEW_RESUMED", "LIKED", "SEARCHED"]
+      }
+    },
+    {
+      "name": "timestamp",
+      "type": {"type": "long", "logicalType": "timestamp-millis"},
+      "doc": "UTC event timestamp (milliseconds since epoch)."
+    },
+    {
+      "name": "device_type",
+      "type": {
+        "type": "enum",
+        "name": "DeviceType",
+        "symbols": ["MOBILE", "DESKTOP", "TV", "TABLET"]
+      }
+    },
+    {"name": "session_id",        "type": "string"},
+    {"name": "progress_seconds",  "type": "int", "default": 0}
+  ]
+}

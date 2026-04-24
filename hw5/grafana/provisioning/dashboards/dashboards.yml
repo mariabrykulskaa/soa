@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: default
+    folder: Cinema
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 15
+    options:
+      path: /var/lib/grafana/dashboards
