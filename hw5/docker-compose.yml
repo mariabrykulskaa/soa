@@ -21,9 +21,9 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
-      ZOOKEEPER_4LW_COMMANDS_WHITELIST: "ruok,srvr,stat,mntr"
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=*"
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo ruok | (exec 3<>/dev/tcp/localhost/2181; cat >&3; cat <&3)' 2>/dev/null | grep -q imok"]
+      test: ["CMD-SHELL", "bash -c 'echo srvr | (exec 3<>/dev/tcp/localhost/2181; cat >&3; cat <&3)' 2>/dev/null | grep -q Zookeeper"]
       interval: 5s
       timeout: 10s
       retries: 30
@@ -140,6 +140,7 @@ services:
     volumes:
       - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
       - ./clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+      - ./clickhouse/users.d:/etc/clickhouse-server/users.d:ro
       - ch_data:/var/lib/clickhouse
     environment:
       CLICKHOUSE_DB: cinema

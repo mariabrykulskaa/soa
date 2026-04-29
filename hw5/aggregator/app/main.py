@@ -6,6 +6,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
+from typing import Optional
 
 import uvicorn
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -120,7 +121,7 @@ app = FastAPI(title="cinema aggregator", lifespan=lifespan)
 
 
 class DateBody(BaseModel):
-    date: date | None = None
+    date: Optional[date] = None
 
 
 @app.get("/health")
