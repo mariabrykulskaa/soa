@@ -21,6 +21,7 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_4LW_COMMANDS_WHITELIST: "ruok,srvr,stat,mntr"
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo ruok | (exec 3<>/dev/tcp/localhost/2181; cat >&3; cat <&3)' 2>/dev/null | grep -q imok"]
       interval: 5s
