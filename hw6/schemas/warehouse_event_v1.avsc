@@ -1,0 +1,105 @@
+{
+  "type": "record",
+  "name": "WarehouseEvent",
+  "namespace": "com.warehouse",
+  "doc": "Warehouse management system event. Version 1.",
+  "fields": [
+    {
+      "name": "event_id",
+      "type": "string",
+      "doc": "Unique event identifier (UUIDv4)."
+    },
+    {
+      "name": "event_type",
+      "type": {
+        "type": "enum",
+        "name": "EventType",
+        "symbols": [
+          "PRODUCT_RECEIVED",
+          "PRODUCT_SHIPPED",
+          "PRODUCT_MOVED",
+          "PRODUCT_RESERVED",
+          "PRODUCT_RELEASED",
+          "INVENTORY_COUNTED",
+          "ORDER_CREATED",
+          "ORDER_COMPLETED"
+        ]
+      },
+      "doc": "Type of warehouse operation."
+    },
+    {
+      "name": "timestamp",
+      "type": {"type": "long", "logicalType": "timestamp-millis"},
+      "doc": "Event timestamp (UTC milliseconds since epoch). Used for out-of-order detection."
+    },
+    {
+      "name": "version",
+      "type": "long",
+      "default": 1,
+      "doc": "Monotonically increasing sequence number per entity for out-of-order detection."
+    },
+    {
+      "name": "product_id",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Product SKU. Required for product-related events."
+    },
+    {
+      "name": "zone_id",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Warehouse zone identifier. Used for RECEIVED, SHIPPED, RESERVED, RELEASED, INVENTORY_COUNTED."
+    },
+    {
+      "name": "from_zone_id",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Source zone for PRODUCT_MOVED event."
+    },
+    {
+      "name": "to_zone_id",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Destination zone for PRODUCT_MOVED event."
+    },
+    {
+      "name": "quantity",
+      "type": ["null", "int"],
+      "default": null,
+      "doc": "Quantity of product involved in the event."
+    },
+    {
+      "name": "counted_quantity",
+      "type": ["null", "int"],
+      "default": null,
+      "doc": "Absolute counted quantity for INVENTORY_COUNTED event."
+    },
+    {
+      "name": "order_id",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Order identifier for ORDER_CREATED and ORDER_COMPLETED events."
+    },
+    {
+      "name": "order_items",
+      "type": [
+        "null",
+        {
+          "type": "array",
+          "items": {
+            "type": "record",
+            "name": "OrderItem",
+            "doc": "A single line item in a warehouse order.",
+            "fields": [
+              {"name": "product_id", "type": "string"},
+              {"name": "zone_id",    "type": "string"},
+              {"name": "quantity",   "type": "int"}
+            ]
+          }
+        }
+      ],
+      "default": null,
+      "doc": "List of order items for ORDER_CREATED event."
+    }
+  ]
+}

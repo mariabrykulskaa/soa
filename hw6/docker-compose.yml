@@ -1,0 +1,330 @@
+name: warehouse-hw6
+
+# ---------------------------------------------------------------------------
+# Shared Kafka config anchor
+# ---------------------------------------------------------------------------
+x-kafka-base: &kafka-base
+  image: confluentinc/cp-kafka:7.6.1
+  depends_on:
+    zookeeper:
+      condition: service_healthy
+  environment: &kafka-env
+    KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+    KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+    KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    KAFKA_MIN_INSYNC_REPLICAS: 1
+    KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+    KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # ZooKeeper
+  # ---------------------------------------------------------------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    hostname: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=*"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo ruok | (exec 3<>/dev/tcp/localhost/2181; cat >&3; cat <&3)' 2>/dev/null | grep imok"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Kafka broker
+  # ---------------------------------------------------------------------------
+  kafka:
+    <<: *kafka-base
+    hostname: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 1
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:29092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # Schema Registry
+  # ---------------------------------------------------------------------------
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.6.1
+    hostname: schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/subjects >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # Kafka init: create topics + register Avro schemas
+  # ---------------------------------------------------------------------------
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    volumes:
+      - ./schemas:/schemas:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+
+        echo "==> Creating topic warehouse-events (partitions=3, rf=1)"
+        kafka-topics --bootstrap-server kafka:29092 \
+          --create --if-not-exists \
+          --topic warehouse-events \
+          --partitions 3 \
+          --replication-factor 1
+
+        echo "==> Creating topic warehouse-events-dlq (partitions=1, rf=1)"
+        kafka-topics --bootstrap-server kafka:29092 \
+          --create --if-not-exists \
+          --topic warehouse-events-dlq \
+          --partitions 1 \
+          --replication-factor 1
+
+        echo "==> Listing topics"
+        kafka-topics --bootstrap-server kafka:29092 --list
+
+        echo "==> Registering V1 schema"
+        apk add --no-cache curl jq >/dev/null 2>&1
+        BODY=$$(jq -Rs '{schemaType:"AVRO", schema: .}' < /schemas/warehouse_event_v1.avsc)
+        curl -fsS -X POST \
+          -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+          -d "$$BODY" \
+          http://schema-registry:8081/subjects/warehouse-events-value/versions
+        echo ""
+
+        echo "==> Setting compatibility mode to BACKWARD"
+        curl -fsS -X PUT \
+          -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+          -d '{"compatibility":"BACKWARD"}' \
+          http://schema-registry:8081/config/warehouse-events-value
+        echo ""
+
+        echo "==> Registering V2 schema (backward-compatible: adds supplier_id with default null)"
+        BODY=$$(jq -Rs '{schemaType:"AVRO", schema: .}' < /schemas/warehouse_event_v2.avsc)
+        curl -fsS -X POST \
+          -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+          -d "$$BODY" \
+          http://schema-registry:8081/subjects/warehouse-events-value/versions
+        echo ""
+
+        echo "==> Registered schema versions:"
+        curl -fsS http://schema-registry:8081/subjects/warehouse-events-value/versions
+        echo ""
+        echo "==> Init done."
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Cassandra 3-node cluster
+  # ---------------------------------------------------------------------------
+  cassandra-1:
+    image: cassandra:4.1
+    hostname: cassandra-1
+    ports:
+      - "9042:9042"
+    environment:
+      CASSANDRA_CLUSTER_NAME: warehouse-cluster
+      CASSANDRA_DC: dc1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_SEEDS: cassandra-1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      HEAP_NEWSIZE: 128M
+      MAX_HEAP_SIZE: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -u cassandra -p cassandra -e 'describe cluster' >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 15s
+      retries: 30
+      start_period: 60s
+    volumes:
+      - cassandra-1-data:/var/lib/cassandra
+
+  cassandra-2:
+    image: cassandra:4.1
+    hostname: cassandra-2
+    depends_on:
+      cassandra-1:
+        condition: service_healthy
+    environment:
+      CASSANDRA_CLUSTER_NAME: warehouse-cluster
+      CASSANDRA_DC: dc1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_SEEDS: cassandra-1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      HEAP_NEWSIZE: 128M
+      MAX_HEAP_SIZE: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -u cassandra -p cassandra -e 'describe cluster' >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 15s
+      retries: 30
+      start_period: 60s
+    volumes:
+      - cassandra-2-data:/var/lib/cassandra
+
+  cassandra-3:
+    image: cassandra:4.1
+    hostname: cassandra-3
+    depends_on:
+      cassandra-2:
+        condition: service_healthy
+    environment:
+      CASSANDRA_CLUSTER_NAME: warehouse-cluster
+      CASSANDRA_DC: dc1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_SEEDS: cassandra-1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      HEAP_NEWSIZE: 128M
+      MAX_HEAP_SIZE: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -u cassandra -p cassandra -e 'describe cluster' >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 15s
+      retries: 30
+      start_period: 60s
+    volumes:
+      - cassandra-3-data:/var/lib/cassandra
+
+  # ---------------------------------------------------------------------------
+  # Cassandra init: apply CQL migrations
+  # ---------------------------------------------------------------------------
+  cassandra-init:
+    image: cassandra:4.1
+    depends_on:
+      cassandra-1:
+        condition: service_healthy
+      cassandra-2:
+        condition: service_healthy
+      cassandra-3:
+        condition: service_healthy
+    volumes:
+      - ./cassandra/init:/init:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        echo "==> Applying Cassandra migrations..."
+        for f in /init/*.cql; do
+          echo "--- Applying: $$f ---"
+          cqlsh cassandra-1 -f "$$f"
+        done
+        echo "==> Migrations applied successfully."
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Producer (WMS emulator) — HTTP API + background event generator
+  # ---------------------------------------------------------------------------
+  producer:
+    build: ./producer
+    hostname: producer
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      KAFKA_TOPIC: warehouse-events
+      GENERATE_INTERVAL_MS: "2000"
+      AUTO_GENERATE: "true"
+    restart: on-failure
+
+  # ---------------------------------------------------------------------------
+  # Consumer (stateful warehouse state manager)
+  # ---------------------------------------------------------------------------
+  consumer:
+    build: ./consumer
+    hostname: consumer
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      cassandra-init:
+        condition: service_completed_successfully
+    ports:
+      - "8082:8082"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      KAFKA_TOPIC: warehouse-events
+      KAFKA_DLQ_TOPIC: warehouse-events-dlq
+      KAFKA_GROUP_ID: warehouse-state-consumer
+      CASSANDRA_HOSTS: cassandra-1,cassandra-2,cassandra-3
+      CASSANDRA_KEYSPACE: warehouse
+      CASSANDRA_CONSISTENCY_WRITE: QUORUM
+      CASSANDRA_CONSISTENCY_READ: ONE
+      HTTP_PORT: "8082"
+    restart: on-failure
+
+  # ---------------------------------------------------------------------------
+  # Prometheus
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    hostname: prometheus
+    depends_on:
+      - consumer
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+
+  # ---------------------------------------------------------------------------
+  # Grafana
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.2
+    hostname: grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+
+volumes:
+  cassandra-1-data:
+  cassandra-2-data:
+  cassandra-3-data:
